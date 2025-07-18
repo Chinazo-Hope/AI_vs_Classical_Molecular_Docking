@@ -1,0 +1,145 @@
+"""
+Script Name: generate_ligand_mapping_bd2.py
+Author: Chinazo Emeh
+Date: 2025-07-15
+
+Description:
+------------
+This script queries the RCSB Protein Data Bank (PDB) to retrieve all crystal structures 
+containing BRD4-BD2 (bromodomain-containing protein 4, domain 2) in *Homo sapiens*.
+
+It extracts:
+- Unique ID for internal reference
+- PDB ID and a standardised filename
+- Ligands (non-polymer small molecules)
+- Ligand candidates (same as ligands in this context)
+- Residue types (amino acids from polymer sequences)
+
+The results are saved in a CSV: `ligand_mapping_bd2.csv`.
+
+Dependencies:
+    pip install requests tqdm
+
+Output:
+    - ligand_mapping_bd2.csv (in current directory)
+"""
+
+import requests
+import csv
+from pathlib import Path
+from tqdm import tqdm
+
+# Output CSV file path
+output_csv = Path("ligand_mapping_bd2.csv")
+
+# Define RCSB Search URL
+search_url = "https://search.rcsb.org/rcsbsearch/v2/query"
+
+# Define query to return structures matching BRD4-BD2 + Homo sapiens
+query = {
+    "query": {
+        "type": "group",
+        "logical_operator": "and",
+        "nodes": [
+            {
+                "type": "terminal",
+                "service": "text",
+                "parameters": {
+                    "attribute": "rcsb_entity_source_organism.taxonomy_lineage.name",
+                    "operator": "exact_match",
+                    "value": "Homo sapiens"
+                }
+            },
+            {
+                "type": "terminal",
+                "service": "text",
+                "parameters": {
+                    "attribute": "rcsb_entry_info.struct_title",
+                    "operator": "contains_phrase",
+                    "value": "BRD4"
+                }
+            },
+            {
+                "type": "terminal",
+                "service": "text",
+                "parameters": {
+                    "attribute": "rcsb_polymer_entity_container_identifiers.entity_poly_name_combined",
+                    "operator": "contains_phrase",
+                    "value": "bromodomain"
+                }
+            }
+        ]
+    },
+    "return_type": "entry"
+}
+
+# Start the query
+print("Querying RCSB PDB for BRD4-BD2 (Homo sapiens) entries...")
+response = requests.post(search_url, json=query)
+response.raise_for_status()
+
+# Extract PDB IDs from response
+pdb_ids = [entry["identifier"] for entry in response.json().get("result_set", [])]
+total_found = len(pdb_ids)
+print(f"Total PDB entries found: {total_found}\n")
+
+# Define base URL for fetching PDB metadata
+entry_summary_url = "https://data.rcsb.org/rest/v1/core/entry/{}"
+
+# Define CSV header
+headers = ["UniqueID", "PBD ID", "PDB_ID", "Ligand(s)", "All Ligand Candidates", "All Residues"]
+
+# Keep count of successfully processed entries
+successful_rows = 0
+
+# Open the output CSV file and write header
+with open(output_csv, "w", newline="") as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(headers)
+
+    # Loop through each PDB ID
+    for i, pdb_id in enumerate(tqdm(pdb_ids, desc="Processing entries"), start=1):
+        try:
+            # Fetch the core entry data
+            entry_resp = requests.get(entry_summary_url.format(pdb_id))
+            if not entry_resp.ok:
+                continue  # Skip failed downloads
+
+            data = entry_resp.json()
+
+            # Extract non-polymer components (ligands and candidates)
+            chem_components = data.get("rcsb_entry_container_identifiers", {}).get("nonpolymer_entity_ids", [])
+            ligands = set(chem_components)
+            candidates = set(chem_components)
+
+            # Extract amino acid residues from protein chains
+            residues = set()
+            poly_ids = data.get("rcsb_entry_container_identifiers", {}).get("polymer_entity_ids", [])
+            for poly_id in poly_ids:
+                poly_url = f"https://data.rcsb.org/rest/v1/core/polymer_entity/{pdb_id}/{poly_id}"
+                poly_resp = requests.get(poly_url)
+                if poly_resp.ok:
+                    poly_data = poly_resp.json()
+                    sequence = poly_data.get("entity_poly", {}).get("pdbx_seq_one_letter_code_can", "")
+                    residues.update([aa for aa in sequence if aa.isalpha()])
+
+            # Format output fields
+            unique_id = f"BRD4-BD2_{i}"
+            pdb_filename = f"pdb_0000{pdb_id.lower()}"
+            ligands_str = ", ".join(sorted(ligands)) if ligands else "NA"
+            candidates_str = ", ".join(sorted(candidates)) if candidates else "NA"
+            residues_str = ", ".join(sorted(residues)) if residues else "NA"
+
+            # Write the row to CSV
+            writer.writerow([unique_id, pdb_filename, pdb_id, ligands_str, candidates_str, residues_str])
+            successful_rows += 1  # Count only successful entries
+
+        except Exception as e:
+            print(f"Failed to process {pdb_id}: {e}")
+            continue
+
+# Final status report
+print(f"\nFinished processing.")
+print(f"Total entries found: {total_found}")
+print(f"Successfully written to CSV: {successful_rows}")
+print(f"CSV saved at: {output_csv.resolve()}")
